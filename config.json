@@ -1,0 +1,22 @@
+[
+  {
+    "id": "block-bad-ip-ranges",
+    "action": "block",
+    "expression": "ip.src == \"203.0.113.*\" or ip.src == \"198.51.*.*\""
+  },
+  {
+    "id": "log-admin-post-requests",
+    "action": "log",
+    "expression": "http.request.uri.path contains \"/admin\" and http.request.method == \"POST\""
+  },
+  {
+    "id": "allow-good-bot",
+    "action": "allow",
+    "expression": "http.user_agent contains \"MyTrustedBot\""
+  },
+  {
+    "id": "block-complex-attack",
+    "action": "block",
+    "expression": "(http.request.uri.path contains \".php\" or http.request.uri.path contains \"UNION SELECT\") and http.request.method != \"GET\""
+  }
+]

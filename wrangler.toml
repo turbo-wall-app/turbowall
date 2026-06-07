@@ -1,0 +1,7 @@
+name = "turbo-wall"
+main = "src/cf-worker.js"
+compatibility_date = "2026-06-07"
+
+routes = [
+  { pattern = "test.turbocloud.dev/*", zone_name = "turbocloud.dev" }
+]
