@@ -23,5 +23,29 @@
     "id": "block-complex-attack",
     "action": "block",
     "expression": "(http.request.uri.path contains \".php\" or http.request.uri.path contains \"UNION SELECT\") and http.request.method != \"GET\""
+  },
+  {
+    "id": "block-xss-request",
+    "phase": "request",
+    "action": "block",
+    "expression": "http.request.body matches \"(?i)(<script|javascript:|onerror\\\\s*=)\" or http.request.uri.path matches \"(?i)(<script|javascript:|onerror\\\\s*=)\""
+  },
+  {
+    "id": "block-sql-injection-body",
+    "phase": "request",
+    "action": "block",
+    "expression": "http.request.body matches \"(?i)(UNION\\\\s+SELECT|DROP\\\\s+TABLE)\""
+  },
+  {
+    "id": "block-xss-response",
+    "phase": "response",
+    "action": "block",
+    "expression": "http.response.body matches \"(?i)(<script[^>]*>alert\\\\(|javascript:)\""
+  },
+  {
+    "id": "block-data-leak",
+    "phase": "response",
+    "action": "block",
+    "expression": "http.response.body contains \"-----BEGIN PRIVATE KEY-----\""
   }
 ]

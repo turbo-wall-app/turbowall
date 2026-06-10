@@ -7,7 +7,6 @@
  * * Supported Operators: ==, !=, contains
  * Supported Logic: and, or, (...)
  * Supported Fields: ip.src, http.request.uri.path, http.request.method, http.user_agent, http.host
- * * NEW: Wildcards (*) are now supported for == and != operators.
  */
 import WAF_RULES from "../config.json";
 
@@ -15,71 +14,136 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // 1. Map Cloudflare standard fields to the request context
+    // ==========================================
+    // PHASE 1: REQUEST EVALUATION
+    // ==========================================
+    const reqBodyText = await safelyReadBody(request);
+
     const reqContext = {
       "ip.src": request.headers.get("cf-connecting-ip") || "127.0.0.1",
       "http.request.uri.path": url.pathname,
       "http.request.method": request.method,
       "http.user_agent": request.headers.get("user-agent") || "",
       "http.host": url.hostname,
+      "http.request.body": reqBodyText,
     };
 
-    // 2. Evaluate WAF Rules
-    for (const rule of WAF_RULES) {
-      if (evaluateExpression(rule.expression, reqContext)) {
-        switch (rule.action) {
-          case "block":
-            console.log(
-              `[WAF BLOCK] Rule ID: ${rule.id} | IP: ${reqContext["ip.src"]} | Path: ${reqContext["http.request.uri.path"]}`,
-            );
-            return new Response("403 Forbidden - Request blocked by WAF", {
-              status: 403,
-              headers: { "Content-Type": "text/plain" },
-            });
-
-          case "allow":
-            console.log(
-              `[WAF ALLOW] Rule ID: ${rule.id} | IP: ${reqContext["ip.src"]}`,
-            );
-            break;
-
-          case "log":
-            console.log(
-              `[WAF LOG] Rule ID: ${rule.id} | IP: ${reqContext["ip.src"]} | Path: ${reqContext["http.request.uri.path"]}`,
-            );
-            continue;
-        }
-
-        if (rule.action === "allow") {
-          break;
-        }
-      }
+    const requestWafResult = runWafEngine(WAF_RULES, "request", reqContext);
+    if (requestWafResult.blocked) {
+      return requestWafResult.response;
     }
 
-    // 3. Fetch Origin
+    // ==========================================
+    // FETCH ORIGIN
+    // ==========================================
+    let originResponse;
     try {
-      return await fetch(request);
+      // If a rule had 'allow', it bypassed remaining rules but still reaches here
+      originResponse = await fetch(request);
     } catch (e) {
       return new Response("Origin Error", { status: 502 });
     }
+
+    // ==========================================
+    // PHASE 2: RESPONSE EVALUATION
+    // ==========================================
+    const resBodyText = await safelyReadBody(originResponse);
+
+    // Merge contexts so response rules can still evaluate request data if needed
+    const resContext = {
+      ...reqContext,
+      "http.response.body": resBodyText,
+      "http.response.code": String(originResponse.status),
+    };
+
+    const responseWafResult = runWafEngine(WAF_RULES, "response", resContext);
+    if (responseWafResult.blocked) {
+      return responseWafResult.response;
+    }
+
+    // If neither phase blocked, return the original response to the user
+    return originResponse;
   },
 };
 
 /**
- * --- EXPRESSION ENGINE ---
+ * --- WAF RUNNER ---
+ * Executes the rules for a specific phase
+ */
+function runWafEngine(rules, currentPhase, context) {
+  for (const rule of rules) {
+    // Skip rules that don't belong to the current execution phase
+    if (rule.phase !== currentPhase) continue;
+
+    if (evaluateExpression(rule.expression, context)) {
+      switch (rule.action) {
+        case "block":
+          console.log(
+            `[WAF BLOCK - ${currentPhase.toUpperCase()}] Rule: ${rule.id}`,
+          );
+          return {
+            blocked: true,
+            response: new Response(
+              `403 Forbidden - Blocked by WAF at ${currentPhase} phase`,
+              {
+                status: 403,
+                headers: { "Content-Type": "text/plain" },
+              },
+            ),
+          };
+
+        case "allow":
+          console.log(
+            `[WAF ALLOW - ${currentPhase.toUpperCase()}] Rule: ${rule.id}`,
+          );
+          return { blocked: false }; // Instantly break out and allow
+
+        case "log":
+          console.log(
+            `[WAF LOG - ${currentPhase.toUpperCase()}] Rule: ${rule.id}`,
+          );
+          continue;
+      }
+    }
+  }
+  return { blocked: false };
+}
+
+/**
+ * --- SAFE BODY READER ---
+ * Safely clones and reads the HTTP body without crashing the Worker
+ */
+async function safelyReadBody(requestOrResponse) {
+  // 1. Clone the stream so we don't consume the original
+  const cloned = requestOrResponse.clone();
+
+  try {
+    // 2. Read as an ArrayBuffer, NOT text().
+    // This allows us to slice the data before decoding it into a memory-heavy string.
+    const buffer = await cloned.arrayBuffer();
+
+    // 3. Decode only the first 128KB to prevent CPU/memory spikes on large file uploads/downloads
+    const decoder = new TextDecoder("utf-8");
+    return decoder.decode(buffer.slice(0, 128 * 1024));
+  } catch (e) {
+    console.error("Failed to read body securely", e);
+    return "";
+  }
+}
+
+/**
+ * --- EXPRESSION ENGINE (AST + Evaluator) ---
  */
 
 function evaluateExpression(expr, ctx) {
   const tokens = tokenize(expr);
   if (!tokens.length) return false;
-
   const ast = parseTokens(tokens);
   return evaluateAST(ast, ctx);
 }
 
 function tokenize(expr) {
   const tokens = [];
-  // ADDED 'matches' to the list of recognized operators
   const regex =
     /\s*(?:(\()|(\))|(and|or|==|!=|contains|matches)|"([^"]*)"|'([^']*)'|([a-zA-Z0-9_.-]+))\s*/gi;
   let match;
@@ -120,7 +184,6 @@ function parseTokens(tokens) {
 
   function parseFactor() {
     if (pos >= tokens.length) return null;
-
     if (tokens[pos].type === "LPAREN") {
       pos++;
       let node = parseExpr();
@@ -133,10 +196,8 @@ function parseTokens(tokens) {
     let val = tokens[pos++];
 
     if (!field || !op || !val) return { type: "ERROR" };
-
     return { type: "COND", field: field.val, op: op.val, value: val.val };
   }
-
   return parseExpr();
 }
 
@@ -148,18 +209,12 @@ function wildcardMatch(str, pattern) {
 
 function evaluateAST(node, ctx) {
   if (!node || node.type === "ERROR") return false;
-
-  if (node.type === "OR") {
+  if (node.type === "OR")
     return evaluateAST(node.left, ctx) || evaluateAST(node.right, ctx);
-  }
-
-  if (node.type === "AND") {
+  if (node.type === "AND")
     return evaluateAST(node.left, ctx) && evaluateAST(node.right, ctx);
-  }
 
   if (node.type === "COND") {
-    // Note: We don't lowercase fieldVal here for 'matches' because regex might be case-sensitive.
-    // Lowercasing is handled on a per-operator basis below.
     let rawFieldVal = String(
       ctx[node.field] !== undefined ? ctx[node.field] : "",
     );
@@ -173,37 +228,28 @@ function evaluateAST(node, ctx) {
         if (targetVal.includes("*"))
           return wildcardMatch(lowerFieldVal, lowerTargetVal);
         return lowerFieldVal === lowerTargetVal;
-
       case "!=":
         if (targetVal.includes("*"))
           return !wildcardMatch(lowerFieldVal, lowerTargetVal);
         return lowerFieldVal !== lowerTargetVal;
-
       case "contains":
         return lowerFieldVal.includes(lowerTargetVal);
-
       case "matches":
         try {
-          // Cloudflare supports (?i) for case-insensitivity at the start of a regex
           let isCaseInsensitive = targetVal.startsWith("(?i)");
           let cleanRegexStr = isCaseInsensitive
             ? targetVal.substring(4)
             : targetVal;
           let flags = isCaseInsensitive ? "i" : "";
-
           let regexPattern = new RegExp(cleanRegexStr, flags);
           return regexPattern.test(rawFieldVal);
         } catch (e) {
-          console.error(
-            `[WAF ERROR] Invalid Regular Expression in rule: ${targetVal}`,
-          );
-          return false; // Fail open (don't match) if the regex is malformed
+          console.error(`[WAF ERROR] Invalid Regex: ${targetVal}`);
+          return false;
         }
-
       default:
         return false;
     }
   }
-
   return false;
 }
