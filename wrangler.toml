@@ -3,7 +3,7 @@ main = "src/cf-worker.js"
 compatibility_date = "2026-06-07"
 
 routes = [
-  { pattern = "test.turbocloud.dev/*", zone_name = "turbocloud.dev" }
+  { pattern = "test.domain.com/*", zone_name = "domain.com" }
 ]
 
 [observability]

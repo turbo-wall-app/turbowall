@@ -79,8 +79,9 @@ function evaluateExpression(expr, ctx) {
 
 function tokenize(expr) {
   const tokens = [];
+  // ADDED 'matches' to the list of recognized operators
   const regex =
-    /\s*(?:(\()|(\))|(and|or|==|!=|contains)|"([^"]*)"|'([^']*)'|([a-zA-Z0-9_.-]+))\s*/gi;
+    /\s*(?:(\()|(\))|(and|or|==|!=|contains|matches)|"([^"]*)"|'([^']*)'|([a-zA-Z0-9_.-]+))\s*/gi;
   let match;
 
   while ((match = regex.exec(expr)) !== null) {
@@ -139,16 +140,9 @@ function parseTokens(tokens) {
   return parseExpr();
 }
 
-/**
- * Helper to safely convert wildcard strings (e.g., 192.168.*) into Regular Expressions
- */
 function wildcardMatch(str, pattern) {
-  // Escape all standard regex characters except the asterisk
   const escapeRegex = (s) => s.replace(/([.+?^=!:${}()|\[\]\/\\])/g, "\\$1");
-
-  // Split by asterisk, escape the text chunks, then join with '.*'
   const regexStr = "^" + pattern.split("*").map(escapeRegex).join(".*") + "$";
-
   return new RegExp(regexStr, "i").test(str);
 }
 
@@ -164,22 +158,47 @@ function evaluateAST(node, ctx) {
   }
 
   if (node.type === "COND") {
-    let fieldVal = String(
+    // Note: We don't lowercase fieldVal here for 'matches' because regex might be case-sensitive.
+    // Lowercasing is handled on a per-operator basis below.
+    let rawFieldVal = String(
       ctx[node.field] !== undefined ? ctx[node.field] : "",
-    ).toLowerCase();
-    let targetVal = String(node.value).toLowerCase();
+    );
+    let lowerFieldVal = rawFieldVal.toLowerCase();
+
+    let targetVal = String(node.value);
+    let lowerTargetVal = targetVal.toLowerCase();
 
     switch (node.op) {
       case "==":
-        if (targetVal.includes("*")) return wildcardMatch(fieldVal, targetVal);
-        return fieldVal === targetVal;
+        if (targetVal.includes("*"))
+          return wildcardMatch(lowerFieldVal, lowerTargetVal);
+        return lowerFieldVal === lowerTargetVal;
 
       case "!=":
-        if (targetVal.includes("*")) return !wildcardMatch(fieldVal, targetVal);
-        return fieldVal !== targetVal;
+        if (targetVal.includes("*"))
+          return !wildcardMatch(lowerFieldVal, lowerTargetVal);
+        return lowerFieldVal !== lowerTargetVal;
 
       case "contains":
-        return fieldVal.includes(targetVal);
+        return lowerFieldVal.includes(lowerTargetVal);
+
+      case "matches":
+        try {
+          // Cloudflare supports (?i) for case-insensitivity at the start of a regex
+          let isCaseInsensitive = targetVal.startsWith("(?i)");
+          let cleanRegexStr = isCaseInsensitive
+            ? targetVal.substring(4)
+            : targetVal;
+          let flags = isCaseInsensitive ? "i" : "";
+
+          let regexPattern = new RegExp(cleanRegexStr, flags);
+          return regexPattern.test(rawFieldVal);
+        } catch (e) {
+          console.error(
+            `[WAF ERROR] Invalid Regular Expression in rule: ${targetVal}`,
+          );
+          return false; // Fail open (don't match) if the regex is malformed
+        }
 
       default:
         return false;

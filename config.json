@@ -5,9 +5,14 @@
     "expression": "ip.src == \"203.0.113.*\" or ip.src == \"198.51.*.*\""
   },
   {
-    "id": "log-admin-post-requests",
+    "id": "block-bots-regex",
+    "action": "block",
+    "expression": "http.user_agent matches \"(?i)^(curl|wget|python-requests|scapy)\""
+  },
+  {
+    "id": "log-api-v1-deprecation",
     "action": "log",
-    "expression": "http.request.uri.path contains \"/admin\" and http.request.method == \"POST\""
+    "expression": "http.request.uri.path matches \"^/api/v1/[0-9]+\""
   },
   {
     "id": "allow-good-bot",
