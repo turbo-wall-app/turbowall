@@ -153,7 +153,7 @@ vite.config.ts.timestamp-*
 *.dylib
 
 # Test binaries
-*.test
+*.caddy
 
 # Coverage reports
 *.out
