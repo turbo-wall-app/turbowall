@@ -144,3 +144,46 @@ vite.config.ts.timestamp-*
 
 # Cloudflare
 .wrangler*
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Coverage reports
+*.out
+coverage.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directories (usually not needed with Go modules)
+vendor/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+
+# Build output
+bin/
+dist/
+build/
+
+# Logs
+*.log

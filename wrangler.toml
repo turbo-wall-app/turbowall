@@ -1,5 +1,5 @@
 name = "turbo-wall"
-main = "src/cf-worker.js"
+main = "src/workers/cf-worker.js"
 compatibility_date = "2026-06-07"
 
 routes = [
