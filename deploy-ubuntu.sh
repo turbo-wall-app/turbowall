@@ -158,8 +158,12 @@ export GOROOT=/usr/local/go
 export PATH=$PATH:$GOROOT/bin
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
-cd /root # Assuming the build happens here, adjust if cloning source
-# NOTE: Replace '.' with the actual path to the turbowall-go source if running outside the repo
+cd /opt
+if [ ! -d "turbowall" ]; then
+    git clone https://github.com/turbo-wall-app/turbowall.git
+fi
+cd turbowall
+
 ~/go/bin/xcaddy build --with turbowall-go=$(pwd)/src/standalone
 mv caddy /usr/local/bin/turbowall-server
 

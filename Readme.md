@@ -71,7 +71,9 @@ On the other hand, if you do not use Cloudflare's proxy mode, you lose Cloudflar
 
 ### Deploying the Standalone Version
 
-Work in progress...
+```
+curl -sSL https://raw.githubusercontent.com/turbo-wall-app/turbowall/main/deploy-ubuntu.sh | sudo bash
+```
 
 ### Synchronizing over an Overlay Network (Distributed SQLite)
 
