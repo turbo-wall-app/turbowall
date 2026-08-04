@@ -29,7 +29,7 @@ When deployed on Cloudflare, TurboWall runs as a Worker and handles all requests
 1. Create a Cloudflare account if you don't already have one.
 2. Add your domain to Cloudflare. All domains and subdomains protected by TurboWall must have Cloudflare proxy mode enabled.
 3. Clone the repository.
-4. Edit `config.json` and add your WAF rules.
+4. Edit `src/config.json` and add your WAF rules.
 5. Edit `wrangler.toml` in the project root and configure your domain.
 6. Install Wrangler:
 
@@ -72,6 +72,20 @@ On the other hand, if you do not use Cloudflare's proxy mode, you lose Cloudflar
 ### Deploying the Standalone Version
 
 Work in progress...
+
+### Synchronizing over an Overlay Network (Distributed SQLite)
+
+TurboWall's standalone version supports reading WAF configurations and storing rate limits/request logs in a local SQLite database. By pairing this with tools like **Marmot** or **LiteFS**, you can easily distribute and synchronize state across multiple servers on a peer-to-peer overlay network, avoiding the need for heavy external databases like Redis.
+
+To use the SQLite database integration:
+1. In your Caddyfile, add the `db_path` parameter to the `custom_waf` directive:
+```caddyfile
+custom_waf {
+    db_path /var/lib/turbowall/turbowall.db
+}
+```
+2. TurboWall automatically creates the necessary `rules`, `rate_limits`, and `request_logs` tables.
+3. Updates to the WAF rules in the database are hot-reloaded automatically every 5 seconds.
 
 ### Building the Standalone Version from Source
 

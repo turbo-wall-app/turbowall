@@ -9,6 +9,9 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
+	"database/sql"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -27,9 +30,11 @@ func init() {
 type WAF struct {
 	RulesRaw  string `json:"rules,omitempty"`
 	RulesFile string `json:"rules_file,omitempty"`
+	DbPath    string `json:"db_path,omitempty"`
 
-	rules  []Rule
-	logger *zap.Logger
+	rules     []Rule
+	rulesLock sync.RWMutex
+	logger    *zap.Logger
 }
 
 // CaddyModule returns the Caddy module information.
@@ -44,7 +49,21 @@ func (WAF) CaddyModule() caddy.ModuleInfo {
 func (w *WAF) Provision(ctx caddy.Context) error {
 	w.logger = ctx.Logger()
 
-	if w.RulesFile != "" {
+	if w.DbPath != "" {
+		db, err := InitDB(w.DbPath)
+		if err != nil {
+			return fmt.Errorf("failed to init db: %v", err)
+		}
+		rules, err := LoadRulesFromDB(db)
+		if err != nil {
+			w.logger.Error("failed to load initial rules from db", zap.Error(err))
+		} else {
+			w.rules = rules
+		}
+		InitLogger(db)
+		InitRateLimiter(db)
+		go w.pollRulesFromDB(db)
+	} else if w.RulesFile != "" {
 		data, err := os.ReadFile(w.RulesFile)
 		if err != nil {
 			return fmt.Errorf("failed to read WAF rules file %s: %v", w.RulesFile, err)
@@ -58,6 +77,20 @@ func (w *WAF) Provision(ctx caddy.Context) error {
 		}
 	}
 	return nil
+}
+
+func (w *WAF) pollRulesFromDB(db *sql.DB) {
+	ticker := time.NewTicker(5 * time.Second)
+	for range ticker.C {
+		rules, err := LoadRulesFromDB(db)
+		if err != nil {
+			w.logger.Error("failed to poll rules from db", zap.Error(err))
+			continue
+		}
+		w.rulesLock.Lock()
+		w.rules = rules
+		w.rulesLock.Unlock()
+	}
 }
 
 // ServeHTTP implements the caddyhttp.MiddlewareHandler interface.
@@ -97,54 +130,28 @@ func (w *WAF) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 	r.Header.Del("Accept-Encoding")
 
 	// Intercept the response safely into our custom buffer
-	rb := newResponseBuffer(rw)
+	rb := newResponseBuffer(rw, w, reqContext, r)
 
 	// Call the reverse_proxy
 	err := next.ServeHTTP(rb, r)
 	if err != nil {
 		return err
 	}
-
-	// ==========================================
-	// PHASE 2: RESPONSE EVALUATION
-	// ==========================================
-	resContext := make(map[string]string)
-	for k, v := range reqContext {
-		resContext[k] = v // Merge req context
-	}
-
-	evalBody := rb.buf.String()
-	if len(evalBody) > MaxBodySize {
-		evalBody = evalBody[:MaxBodySize] // Cap string matching size
-	}
-
-	resContext["http.response.body"] = evalBody
-	resContext["http.response.code"] = fmt.Sprintf("%d", rb.status)
-
-	resResult := w.runWafEngine("response", resContext)
-
-	if resResult.Blocked {
-		w.logger.Warn("Blocked by WAF at response phase", zap.String("path", r.URL.Path))
-
-		// Discard buffered origin response completely.
-		// Write a clean 403 directly to the real client.
-		rw.Header().Set("Content-Type", "text/plain")
-		rw.WriteHeader(http.StatusForbidden)
-		rw.Write([]byte("403 Forbidden - Blocked by WAF"))
-		return nil
-	}
-
-	// ALLOWED: Write the intercepted headers, status, and body back to the real client
-	for k, vv := range rb.headers {
-		for _, v := range vv {
-			rw.Header().Add(k, v)
+	
+	// If the origin finished responding and we never filled the buffer enough to trigger evaluation
+	if !rb.wafEvaluated {
+		rb.evaluateWAF()
+		
+		if !rb.wafBlocked {
+			// WAF allowed the small response. Flush it to the client.
+			rb.flushHeaders()
+			if rb.status == 0 {
+				rb.status = http.StatusOK
+			}
+			rw.WriteHeader(rb.status)
+			rw.Write(rb.buf.Bytes())
 		}
 	}
-	if rb.status == 0 {
-		rb.status = http.StatusOK
-	}
-	rw.WriteHeader(rb.status)
-	rw.Write(rb.buf.Bytes())
 
 	return nil
 }
@@ -158,12 +165,23 @@ type responseBuffer struct {
 	buf         bytes.Buffer
 	wroteHeader bool
 	headers     http.Header
+	
+	// Streaming support
+	waf          *WAF
+	reqContext   map[string]string
+	request      *http.Request
+	wafEvaluated bool
+	wafBlocked   bool
+	bytesWritten int
 }
 
-func newResponseBuffer(w http.ResponseWriter) *responseBuffer {
+func newResponseBuffer(w http.ResponseWriter, waf *WAF, reqContext map[string]string, request *http.Request) *responseBuffer {
 	return &responseBuffer{
 		ResponseWriter: w,
 		headers:        make(http.Header),
+		waf:            waf,
+		reqContext:     reqContext,
+		request:        request,
 	}
 }
 
@@ -184,7 +202,79 @@ func (rb *responseBuffer) Write(b []byte) (int, error) {
 	if !rb.wroteHeader {
 		rb.WriteHeader(http.StatusOK)
 	}
-	return rb.buf.Write(b)
+
+	// If WAF already evaluated and blocked, discard
+	if rb.wafEvaluated && rb.wafBlocked {
+		return len(b), nil
+	}
+
+	// If WAF evaluated and allowed, stream directly to client
+	if rb.wafEvaluated && !rb.wafBlocked {
+		return rb.ResponseWriter.Write(b)
+	}
+
+	// WAF not yet evaluated, we are buffering
+	spaceLeft := MaxBodySize - rb.bytesWritten
+	
+	// If the new chunk fits entirely in the remaining buffer
+	if len(b) <= spaceLeft {
+		rb.buf.Write(b)
+		rb.bytesWritten += len(b)
+		return len(b), nil
+	}
+
+	// The chunk exceeds the remaining buffer.
+	// Fill the buffer up to the max size.
+	rb.buf.Write(b[:spaceLeft])
+	rb.bytesWritten += spaceLeft
+	
+	// Evaluate WAF NOW because buffer is full
+	rb.evaluateWAF()
+
+	if rb.wafBlocked {
+		return len(b), nil // Drop the rest
+	}
+
+	// Allowed! Write everything buffered so far to the real client
+	rb.flushHeaders()
+	rb.ResponseWriter.WriteHeader(rb.status)
+	rb.ResponseWriter.Write(rb.buf.Bytes())
+
+	// Write the remainder of the current chunk
+	remainder := b[spaceLeft:]
+	n, err := rb.ResponseWriter.Write(remainder)
+	return spaceLeft + n, err
+}
+
+func (rb *responseBuffer) evaluateWAF() {
+	rb.wafEvaluated = true
+
+	resContext := make(map[string]string)
+	for k, v := range rb.reqContext {
+		resContext[k] = v
+	}
+
+	resContext["http.response.body"] = rb.buf.String()
+	resContext["http.response.code"] = fmt.Sprintf("%d", rb.status)
+
+	resResult := rb.waf.runWafEngine("response", resContext)
+	if resResult.Blocked {
+		rb.wafBlocked = true
+		rb.waf.logger.Warn("Blocked by WAF at response phase (buffered)", zap.String("path", rb.request.URL.Path))
+		
+		// Send 403 to real client
+		rb.ResponseWriter.Header().Set("Content-Type", "text/plain")
+		rb.ResponseWriter.WriteHeader(http.StatusForbidden)
+		rb.ResponseWriter.Write([]byte("403 Forbidden - Blocked by WAF"))
+	}
+}
+
+func (rb *responseBuffer) flushHeaders() {
+	for k, vv := range rb.headers {
+		for _, v := range vv {
+			rb.ResponseWriter.Header().Add(k, v)
+		}
+	}
 }
 
 // Unwrap allows Caddy internal modules to access the underlying writer
@@ -200,12 +290,18 @@ type Rule struct {
 	Action     string `json:"action"`
 	Phase      string `json:"phase"`
 	Expression string `json:"expression"`
+	Limit      int    `json:"limit,omitempty"`
+	Window     int    `json:"window,omitempty"`
 }
 
 type WafResult struct{ Blocked bool }
 
 func (w *WAF) runWafEngine(currentPhase string, context map[string]string) WafResult {
-	for _, rule := range w.rules {
+	w.rulesLock.RLock()
+	rules := w.rules
+	w.rulesLock.RUnlock()
+
+	for _, rule := range rules {
 		if rule.Phase != currentPhase {
 			continue
 		}
@@ -213,12 +309,25 @@ func (w *WAF) runWafEngine(currentPhase string, context map[string]string) WafRe
 			switch rule.Action {
 			case "block":
 				w.logger.Info("WAF BLOCK", zap.String("phase", currentPhase), zap.String("rule", rule.ID))
+				LogRequest(LogEvent{RuleID: rule.ID, Action: "block", Phase: currentPhase, IP: context["ip.src"], Path: context["http.request.uri.path"]})
 				return WafResult{Blocked: true}
 			case "allow":
 				w.logger.Info("WAF ALLOW", zap.String("phase", currentPhase), zap.String("rule", rule.ID))
+				LogRequest(LogEvent{RuleID: rule.ID, Action: "allow", Phase: currentPhase, IP: context["ip.src"], Path: context["http.request.uri.path"]})
 				return WafResult{Blocked: false}
 			case "log":
 				w.logger.Info("WAF LOG", zap.String("phase", currentPhase), zap.String("rule", rule.ID))
+				LogRequest(LogEvent{RuleID: rule.ID, Action: "log", Phase: currentPhase, IP: context["ip.src"], Path: context["http.request.uri.path"]})
+				continue
+			case "rate_limit":
+				if rule.Limit > 0 {
+					key := rule.ID + ":" + context["ip.src"]
+					if !AllowRequest(key, rule.Limit, rule.Window) {
+						w.logger.Warn("RATE LIMIT EXCEEDED", zap.String("phase", currentPhase), zap.String("rule", rule.ID))
+						LogRequest(LogEvent{RuleID: rule.ID, Action: "rate_limit", Phase: currentPhase, IP: context["ip.src"], Path: context["http.request.uri.path"]})
+						return WafResult{Blocked: true}
+					}
+				}
 				continue
 			}
 		}
@@ -384,6 +493,10 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 				}
 			case "rules_file":
 				if !h.Args(&w.RulesFile) {
+					return nil, h.ArgErr()
+				}
+			case "db_path":
+				if !h.Args(&w.DbPath) {
 					return nil, h.ArgErr()
 				}
 			default:

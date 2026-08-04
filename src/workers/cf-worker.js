@@ -118,13 +118,35 @@ async function safelyReadBody(requestOrResponse) {
   const cloned = requestOrResponse.clone();
 
   try {
-    // 2. Read as an ArrayBuffer, NOT text().
-    // This allows us to slice the data before decoding it into a memory-heavy string.
-    const buffer = await cloned.arrayBuffer();
-
-    // 3. Decode only the first 128KB to prevent CPU/memory spikes on large file uploads/downloads
+    const reader = cloned.body.getReader();
     const decoder = new TextDecoder("utf-8");
-    return decoder.decode(buffer.slice(0, 128 * 1024));
+    let text = "";
+    let totalBytes = 0;
+    const maxBytes = 128 * 1024; // 128KB limit
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      totalBytes += value.length;
+      if (totalBytes > maxBytes) {
+        // Only decode up to the remaining allowed bytes
+        const overage = totalBytes - maxBytes;
+        const allowedChunk = value.slice(0, value.length - overage);
+        text += decoder.decode(allowedChunk, { stream: true });
+        
+        // Cancel the reader since we've hit our limit.
+        // This is crucial to prevent downloading the rest of a huge file into memory.
+        await reader.cancel("Reached WAF inspection limit");
+        break;
+      }
+
+      text += decoder.decode(value, { stream: true });
+    }
+    
+    // Flush the decoder
+    text += decoder.decode();
+    return text;
   } catch (e) {
     console.error("Failed to read body securely", e);
     return "";
