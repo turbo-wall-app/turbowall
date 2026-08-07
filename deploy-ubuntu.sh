@@ -16,6 +16,22 @@ GO_VERSION="1.22.3"
 NODE_IP="192.168.100.1/24" # Default Nebula Overlay IP
 NODE_NAME="turbowall-node-1"
 
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64)
+        GO_ARCH="amd64"
+        BIN_ARCH="amd64"
+        ;;
+    aarch64|arm64)
+        GO_ARCH="arm64"
+        BIN_ARCH="arm64"
+        ;;
+    *)
+        echo "Unsupported architecture: $ARCH"
+        exit 1
+        ;;
+esac
+
 echo "========================================"
 echo "Installing System Dependencies..."
 echo "========================================"
@@ -26,9 +42,9 @@ echo "========================================"
 echo "Installing Go (required for xcaddy)..."
 echo "========================================"
 if ! command -v go &> /dev/null; then
-    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
-    rm -rf /usr/local/go && tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-    rm go${GO_VERSION}.linux-amd64.tar.gz
+    wget -q https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
+    rm -rf /usr/local/go && tar -C /usr/local -xzf go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
+    rm go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
     echo "export PATH=\$PATH:/usr/local/go/bin" >> /etc/profile
 fi
 export PATH=$PATH:/usr/local/go/bin
@@ -38,9 +54,9 @@ echo "Installing Nebula (Overlay Network)..."
 echo "========================================"
 mkdir -p /etc/nebula
 if [ ! -f /usr/local/bin/nebula ]; then
-    wget -q https://github.com/slackhq/nebula/releases/download/${NEBULA_VERSION}/nebula-linux-amd64.tar.gz
-    tar -xzf nebula-linux-amd64.tar.gz -C /usr/local/bin/ nebula nebula-cert
-    rm nebula-linux-amd64.tar.gz
+    wget -q https://github.com/slackhq/nebula/releases/download/${NEBULA_VERSION}/nebula-linux-${BIN_ARCH}.tar.gz
+    tar -xzf nebula-linux-${BIN_ARCH}.tar.gz -C /usr/local/bin/ nebula nebula-cert
+    rm nebula-linux-${BIN_ARCH}.tar.gz
 fi
 
 # Generate a dummy CA if one doesn't exist (For demonstration purposes)
@@ -122,9 +138,9 @@ echo "========================================"
 echo "Installing Marmot (Distributed SQLite)..."
 echo "========================================"
 if [ ! -f /usr/local/bin/marmot ]; then
-    wget -q https://github.com/maxpert/marmot/releases/download/${MARMOT_VERSION}/marmot-linux-amd64.tar.gz
-    tar -xzf marmot-linux-amd64.tar.gz -C /usr/local/bin/ marmot
-    rm marmot-linux-amd64.tar.gz
+    wget -q https://github.com/maxpert/marmot/releases/download/${MARMOT_VERSION}/marmot-linux-${BIN_ARCH}.tar.gz
+    tar -xzf marmot-linux-${BIN_ARCH}.tar.gz -C /usr/local/bin/ marmot
+    rm marmot-linux-${BIN_ARCH}.tar.gz
 fi
 
 mkdir -p /var/lib/turbowall
